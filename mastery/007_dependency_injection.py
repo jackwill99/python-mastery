@@ -1,106 +1,72 @@
 from __future__ import annotations
 
-import asyncio
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable, Iterator, Protocol
+from typing import Protocol
 
-# Pro-Tip: Unlike NestJS providers or Flutter's GetIt, Python DI is often lightweight—context managers for lifecycles plus Protocols for typing.
+from fastapi import Depends, FastAPI
 
-
-class DBSession(Protocol):
-    async def execute(self, query: str, params: dict[str, object] | None = None) -> object: ...
+# Pro-Tip: NestJS uses @Injectable + providers; here we stay lightweight with FastAPI Depends and a swappable container for tests.
 
 
-class EmailClient(Protocol):
-    async def send(self, to: str, subject: str, body: str) -> None: ...
+class DatabaseService(Protocol):
+    async def get_balance(self, user_id: str) -> int: ...
+    async def debit(self, user_id: str, amount_cents: int) -> None: ...
 
 
 @dataclass
-class FakeDB:
+class RealDatabase(DatabaseService):
     dsn: str
 
-    async def execute(self, query: str, params: dict[str, object] | None = None) -> object:
-        await asyncio.sleep(0.01)
-        return {"query": query, "params": params}
+    async def get_balance(self, user_id: str) -> int:
+        # Simulate DB call
+        return 100_00
 
-    async def close(self) -> None:
-        await asyncio.sleep(0)
+    async def debit(self, user_id: str, amount_cents: int) -> None:
+        # Simulate update
+        return None
 
 
 @dataclass
-class FakeEmail:
-    api_key: str
+class MockDatabase(DatabaseService):
+    balances: dict[str, int]
 
-    async def send(self, to: str, subject: str, body: str) -> None:
-        await asyncio.sleep(0)
-        print(f"Email to {to}: {subject}\n{body}")
+    async def get_balance(self, user_id: str) -> int:
+        return self.balances.get(user_id, 0)
 
-    async def close(self) -> None:
-        await asyncio.sleep(0)
-
-
-@contextmanager
-def override_attr(obj: object, name: str, replacement: object) -> Iterator[None]:
-    """Testing helper to override an attribute for the scope of the context."""
-
-    original = getattr(obj, name)
-    setattr(obj, name, replacement)
-    try:
-        yield
-    finally:
-        setattr(obj, name, original)
-
-
-@asynccontextmanager
-async def lifespan_db(dsn: str) -> AsyncIterator[FakeDB]:
-    db = FakeDB(dsn=dsn)
-    try:
-        yield db
-    finally:
-        await db.close()
-
-
-@asynccontextmanager
-async def lifespan_email(api_key: str) -> AsyncIterator[FakeEmail]:
-    client = FakeEmail(api_key=api_key)
-    try:
-        yield client
-    finally:
-        await client.close()
+    async def debit(self, user_id: str, amount_cents: int) -> None:
+        self.balances[user_id] = self.get_balance(user_id) - amount_cents  # type: ignore[assignment]
 
 
 @dataclass
 class Container:
-    db_factory: Callable[[], AbstractAsyncContextManager[DBSession]]
-    email_factory: Callable[[], AbstractAsyncContextManager[EmailClient]]
-
-    @asynccontextmanager
-    async def service_scope(self) -> AsyncIterator["Services"]:
-        async with self.db_factory() as db, self.email_factory() as email:
-            yield Services(db=db, email=email)
+    db: DatabaseService
 
 
-@dataclass
-class Services:
-    db: DBSession
-    email: EmailClient
-
-    async def send_welcome(self, user_email: str) -> None:
-        await self.db.execute("insert into audit(event) values (:event)", {"event": "welcome_sent"})
-        await self.email.send(user_email, "Welcome!", "Thanks for joining.")
+real_container = Container(db=RealDatabase(dsn="postgresql://localhost/app"))
+mock_container = Container(db=MockDatabase(balances={"u-1": 50_00}))
 
 
-async def main() -> None:
-    container = Container(
-        db_factory=lambda: lifespan_db("postgresql://localhost/app"),
-        email_factory=lambda: lifespan_email("test-key"),
-    )
-    async with container.service_scope() as services:
-        await services.send_welcome("cto@example.com")
+def get_container() -> Container:
+    return real_container
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+app = FastAPI(title="DI Example", version="1.0.0")
 
-# Pythonic backend problem solved: Declarative lifecycles per request/task without heavy DI frameworks; async context managers guarantee cleanup.
+
+@app.get("/balance/{user_id}")
+async def balance(user_id: str, container: Container = Depends(get_container)) -> dict[str, int]:
+    return {"balance_cents": await container.db.get_balance(user_id)}
+
+
+@app.post("/debit/{user_id}")
+async def debit(user_id: str, amount_cents: int, container: Container = Depends(get_container)) -> dict[str, str]:
+    await container.db.debit(user_id, amount_cents)
+    return {"status": "ok"}
+
+
+# Swapping for tests: override dependency in FastAPI test client
+def set_mock_container() -> None:
+    app.dependency_overrides[get_container] = lambda: mock_container
+
+
+# Pythonic backend problem solved: Simple container + Depends gives DRY, pluggable services; tests can swap RealDatabase with MockDatabase without touching business logic.

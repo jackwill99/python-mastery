@@ -1,72 +1,111 @@
 from __future__ import annotations
 
-from typing import Protocol
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from pydantic import BaseModel, EmailStr, Field
+# Pro-Tip: Similar to NestJS controllers with DTOs + filters, but FastAPI uses Python typing directly for validation, dependency injection, and response shaping.
 
-# Pro-Tip: Similar to NestJS controllers with DTOs, but FastAPI leverages Python type hints directly for validation/docs and dependency injection.
-
-
-class UserCreate(BaseModel):
-    email: EmailStr
-    full_name: str = Field(min_length=1, max_length=120)
-    plan: str = Field(default="free", pattern="^(free|pro)$")
+router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
-class UserOut(BaseModel):
+class UserInternal(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     user_id: str
     email: EmailStr
-    full_name: str
-    plan: str
+    password_hash: str
+    balance_cents: int
 
 
-class UserRepo(Protocol):
-    async def create(self, payload: UserCreate) -> UserOut: ...
+class UserPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
 
-    async def get(self, user_id: str) -> UserOut | None: ...
-
-
-class InMemoryUserRepo:
-    def __init__(self) -> None:
-        self._store: dict[str, UserOut] = {}
-        self._counter = 0
-
-    async def create(self, payload: UserCreate) -> UserOut:
-        self._counter += 1
-        user = UserOut(
-            user_id=f"u{self._counter}",
-            email=payload.email,
-            full_name=payload.full_name,
-            plan=payload.plan,
-        )
-        self._store[user.user_id] = user
-        return user
-
-    async def get(self, user_id: str) -> UserOut | None:
-        return self._store.get(user_id)
+    user_id: str
+    email: EmailStr
+    balance_cents: int
 
 
-repo = InMemoryUserRepo()
-app = FastAPI(title="Pythonic User Service", version="1.0.0")
+class TransactionIn(BaseModel):
+    amount_cents: int = Field(gt=0)
+    currency: str = Field(pattern="^[A-Z]{3}$")
+    recipient: EmailStr
 
 
-async def get_repo() -> UserRepo:
-    return repo
+class TransactionOut(BaseModel):
+    transaction_id: str
+    amount_cents: int
+    currency: str
+    sender: EmailStr
+    recipient: EmailStr
+    status: str
 
 
-@app.post("/users", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-async def create_user(payload: UserCreate, repo_dep: UserRepo = Depends(get_repo)) -> UserOut:
-    user = await repo_dep.create(payload)
+class TransactionError(Exception):
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
+async def notify_async(transaction_id: str) -> None:
+    # Simulate async notification dispatch (e.g., webhook/email)
+    return None
+
+
+async def get_current_user() -> UserInternal:
+    # In production, fetch from auth/session; here we simulate.
+    return UserInternal(user_id="u-1", email="founder@example.com", password_hash="hashed:secret", balance_cents=50_000)
+
+
+@router.post(
+    "",
+    response_model=TransactionOut,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        422: {"description": "validation error"},
+        402: {"description": "insufficient funds"},
+    },
+)
+async def create_transaction(
+    payload: TransactionIn,
+    bg: BackgroundTasks,
+    user: UserInternal = Depends(get_current_user),
+) -> TransactionOut:
+    if payload.amount_cents > user.balance_cents:
+        raise TransactionError("insufficient funds")
+    txn_id = "txn_123"  # stub; real service would persist
+    bg.add_task(notify_async, txn_id)
+    return TransactionOut(
+        transaction_id=txn_id,
+        amount_cents=payload.amount_cents,
+        currency=payload.currency,
+        sender=user.email,
+        recipient=payload.recipient,
+        status="pending",
+    )
+
+
+async def transaction_error_handler(request: Request, exc: TransactionError) -> Response:
+    return JSONResponse(
+        status_code=status.HTTP_402_PAYMENT_REQUIRED,
+        content={"detail": exc.message, "path": request.url.path},
+    )
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Financial Service", version="1.0.0")
+    app.include_router(router)
+    app.add_exception_handler(TransactionError, transaction_error_handler)
+    return app
+
+
+app = create_app()
+
+
+@router.get("/me", response_model=UserPublic)
+async def get_me(user: UserInternal = Depends(get_current_user)) -> UserPublic:
+    # Response model strips password_hash automatically, returning only safe fields.
     return user
 
 
-@app.get("/users/{user_id}", response_model=UserOut)
-async def fetch_user(user_id: str, repo_dep: UserRepo = Depends(get_repo)) -> UserOut:
-    user = await repo_dep.get(user_id)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
-    return user
-
-
-# Pythonic backend problem solved: Lean HTTP layer with typed DTOs and DI; you can swap `InMemoryUserRepo` for a real DB without touching handlers.
+# Pythonic backend problem solved: Typed request/response models protect sensitive fields, custom exception handler maps domain errors to HTTP, BackgroundTasks handles async side effects without blocking the request.
