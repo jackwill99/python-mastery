@@ -1,55 +1,40 @@
 from __future__ import annotations
 
-import logging
-import uuid
-from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import Callable, Coroutine
+from fastapi import FastAPI
+from opentelemetry import trace
+from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-# Pro-Tip: Like OpenTelemetry in Node/Dart, but ContextVars let you propagate trace/span IDs through async code without manual passing.
-
-trace_id_var: ContextVar[str | None] = ContextVar("trace_id", default=None)
-
-
-def get_trace_id() -> str:
-    trace_id = trace_id_var.get()
-    if trace_id is None:
-        trace_id = uuid.uuid4().hex
-        trace_id_var.set(trace_id)
-    return trace_id
+# Senior Pro-Tip: Similar to OpenTelemetry SDK in Node/Java/Dart; set a global tracer provider once, then instrument FastAPI to emit spans to Jaeger/Honeycomb.
 
 
-def with_trace(func: Callable[..., Coroutine[object, object, object]]) -> Callable[..., Coroutine[object, object, object]]:
-    async def wrapper(*args, **kwargs):
-        trace_id = get_trace_id()
-        logging.info("trace start %s", trace_id)
-        try:
-            return await func(*args, **kwargs)
-        finally:
-            logging.info("trace end %s", trace_id)
-
-    return wrapper
+def configure_tracing(service_name: str = "payment-api") -> None:
+    provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
+    jaeger_exporter = JaegerExporter(agent_host_name="localhost", agent_port=6831)
+    provider.add_span_processor(BatchSpanProcessor(jaeger_exporter))
+    trace.set_tracer_provider(provider)
 
 
-@dataclass
-class TracedService:
-    logger: logging.Logger
-
-    @with_trace
-    async def fetch_user(self, user_id: str) -> dict[str, str]:
-        self.logger.info("fetching user %s", user_id, extra={"trace_id": get_trace_id()})
-        return {"user_id": user_id, "status": "ok", "trace_id": get_trace_id()}
+app = FastAPI(title="Traced API", version="1.0.0")
 
 
-async def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    service = TracedService(logger=logging.getLogger("traced"))
-    await service.fetch_user("u-1")
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+def create_app() -> FastAPI:
+    configure_tracing()
+    FastAPIInstrumentor.instrument_app(app, tracer_provider=trace.get_tracer_provider())
+    return app
 
 
 if __name__ == "__main__":
-    import asyncio
+    import uvicorn
 
-    asyncio.run(main())
+    create_app()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
-# Pythonic backend problem solved: Trace IDs propagated via ContextVars; plug into OpenTelemetry exporter later without refactoring business logic.

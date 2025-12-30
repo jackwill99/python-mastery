@@ -1,30 +1,23 @@
 from __future__ import annotations
 
 import cProfile
-import pstats
+import functools
 import time
-from contextlib import contextmanager
-from io import StringIO
-from random import randint
-from typing import Iterator
+from functools import lru_cache
+from typing import Callable
 
-# Pro-Tip: Analogous to Node's inspector or Dart DevTools; cProfile + pstats give CPU hotspots without extra deps.
+# Senior Pro-Tip: Like Node's inspector or Dart DevTools, combine cProfile for CPU hotspots with py-spy for low-overhead sampling in prod-like runs.
 
 
-@contextmanager
-def profile_block(label: str) -> Iterator[None]:
-    profiler = cProfile.Profile()
-    profiler.enable()
-    start = time.perf_counter()
-    try:
-        yield
-    finally:
-        profiler.disable()
-        duration = time.perf_counter() - start
-        stream = StringIO()
-        stats = pstats.Stats(profiler, stream=stream).strip_dirs().sort_stats("cumulative")
-        stats.print_stats(5)
-        print(f"[profile:{label}] {duration:.3f}s\n{stream.getvalue()}")
+def timed(fn: Callable[..., object]) -> Callable[..., object]:
+    @functools.wraps(fn)
+    def wrapper(*args: object, **kwargs: object) -> object:
+        start = time.perf_counter()
+        result = fn(*args, **kwargs)
+        print(f"{fn.__name__} took {time.perf_counter() - start:.4f}s")
+        return result
+
+    return wrapper
 
 
 def fib(n: int) -> int:
@@ -33,13 +26,35 @@ def fib(n: int) -> int:
     return fib(n - 1) + fib(n - 2)
 
 
-def main() -> None:
-    with profile_block("compute"):
-        total = sum(fib(randint(20, 24)) for _ in range(5))
-    print("total:", total)
+@lru_cache(maxsize=256)
+def fib_cached(n: int) -> int:
+    if n <= 1:
+        return n
+    return fib_cached(n - 1) + fib_cached(n - 2)
+
+
+def profile_func(fn: Callable[..., object], *args: object, **kwargs: object) -> None:
+    profiler = cProfile.Profile()
+    profiler.enable()
+    fn(*args, **kwargs)
+    profiler.disable()
+    profiler.print_stats(sort="cumulative")
+
+
+@timed
+def run_unoptimized() -> None:
+    fib(32)
+
+
+@timed
+def run_optimized() -> None:
+    fib_cached(32)
 
 
 if __name__ == "__main__":
-    main()
+    print("== Profiling unoptimized ==")
+    profile_func(run_unoptimized)
+    print("\n== Profiling optimized ==")
+    profile_func(run_optimized)
+    print("Note: Use `py-spy record -o profile.svg -- python mastery/017_performance_profiling.py` for sampling without code changes.")
 
-# Pythonic backend problem solved: Quick profiling of hot paths to guide optimization before adding caching or scaling.

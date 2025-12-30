@@ -1,56 +1,70 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
-from typing import Any
+from dataclasses import dataclass
+from typing import Protocol
+from unittest import mock
 
-# Pro-Tip: Pytest fixtures/parametrize feel like Jest group hooks but with powerful fixture graph; async tests run with pytest.mark.asyncio out of the box.
-
-
-def divide(a: float, b: float) -> float:
-    if b == 0:
-        raise ZeroDivisionError("Cannot divide by zero")
-    return a / b
+# Senior Pro-Tip: Similar to Jest + supertest in Node, but pytest fixtures/parametrize and pytest-asyncio give ergonomic async testing with fewer globals.
 
 
-async def async_lookup(value: str) -> str:
-    await asyncio.sleep(0.01)
-    return value.upper()
+class PaymentGateway(Protocol):
+    async def charge(self, user_id: str, amount_cents: int) -> str: ...
 
 
-# Example tests (save in a tests/ folder). Note: numeric filenames need importlib spec loading.
-pytest_example = r"""
+@dataclass
+class PaymentService:
+    gateway: PaymentGateway
+
+    async def pay(self, user_id: str, amount_cents: int) -> str:
+        if amount_cents <= 0:
+            raise ValueError("amount must be positive")
+        return await self.gateway.charge(user_id, amount_cents)
+
+
+async def main() -> None:
+    # Sanity run
+    gateway = mock.AsyncMock(spec=PaymentGateway)
+    gateway.charge.return_value = "ok"
+    svc = PaymentService(gateway)
+    print(await svc.pay("u-1", 1000))
+
+
+tests = r"""
 import asyncio
-import importlib.util
-from pathlib import Path
 import pytest
+from unittest import mock
 
-spec = importlib.util.spec_from_file_location("sut", Path(__file__).parent / "011_testing_pytest.py")
-module = importlib.util.module_from_spec(spec)
-assert spec and spec.loader
-spec.loader.exec_module(module)
-divide = module.divide
-async_lookup = module.async_lookup
+from mastery._11_testing_pytest import PaymentService, PaymentGateway
 
-@pytest.fixture
-def payload() -> dict[str, int]:
-    return {"a": 10, "b": 2}
 
-def test_divide_basic(payload):
-    assert divide(payload["a"], payload["b"]) == 5
+@pytest.fixture(scope="function")
+def gateway() -> PaymentGateway:
+    gw = mock.AsyncMock(spec=PaymentGateway)
+    gw.charge.return_value = "ok"
+    return gw
 
-@pytest.mark.parametrize("a,b,expected", [(9, 3, 3), (5, 2.5, 2)])
-def test_divide_param(a, b, expected):
-    assert divide(a, b) == expected
 
-def test_divide_zero():
-    with pytest.raises(ZeroDivisionError):
-        divide(1, 0)
+@pytest.fixture(scope="function")
+def service(gateway: PaymentGateway) -> PaymentService:
+    return PaymentService(gateway=gateway)
+
 
 @pytest.mark.asyncio
-async def test_async_lookup():
-    result = await async_lookup("dev")
-    assert result == "DEV"
+@pytest.mark.parametrize("amount_cents", [1, 100, 10_000])
+async def test_pay_success(service: PaymentService, gateway: PaymentGateway, amount_cents: int):
+    result = await service.pay("u-1", amount_cents)
+    assert result == "ok"
+    gateway.charge.assert_awaited_once_with("u-1", amount_cents)
+
+
+@pytest.mark.asyncio
+async def test_pay_rejects_invalid_amount(service: PaymentService):
+    with pytest.raises(ValueError):
+        await service.pay("u-1", 0)
 """
 
-# Pythonic backend problem solved: Concise, composable fixtures and async test support make service contracts testable without heavy mocking frameworks.
+
+if __name__ == "__main__":
+    asyncio.run(main())
+

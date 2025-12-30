@@ -1,61 +1,37 @@
-from __future__ import annotations
+"""
+# Migration Playbook: NestJS/Flutter -> Python
 
-import asyncio
-from dataclasses import dataclass
-from typing import Sequence
+## Senior Pro-Tip
+- Python stack mirrors NestJS (FastAPI + Pydantic + SQLAlchemy) and Flutter clients via OpenAPI/JSON; emphasize typed DTOs and async drivers for parity.
 
-# Pro-Tip: Similar to Prisma/Alembic migrations with feature flags; Python favors idempotent, forward-only steps plus shadow writes to avoid downtime.
+## Data Migration
+- Use dual-writes: keep NestJS live, add Python service writing to new tables/columns.
+- Backfill with idempotent jobs; track progress in a control table.
+- Validate with row counts + checksums; run shadow reads via feature flags.
 
+## API Versioning
+- Keep v1 (NestJS) stable; expose v2 (Python) under /v2 with strict schemas.
+- Use a traffic splitter (gateway) to shift percentages; log mismatches.
 
-@dataclass
-class MigrationStep:
-    name: str
-    sql: str
-    flag: str | None = None  # optional feature flag to guard rollout
+## Zero-Downtime Deployment
+- Blue/green or rolling with health checks.
+- Migrations in safe steps: add nullable, backfill, set not null, swap reads, drop legacy.
+- Feature flags for risky behavior (e.g., dual writes, new payment provider).
 
+## Example: Dual-Write Snippet
+```python
+async def create_user(payload):
+    await nestjs_client.post("/v1/users", json=payload)  # legacy
+    await python_client.post("/v2/users", json=payload)  # new
+```
 
-async def apply_step(step: MigrationStep) -> None:
-    print(f"applying migration: {step.name}")
-    await asyncio.sleep(0.01)  # simulate DB execution
-    if step.flag:
-        print(f"toggle on feature flag: {step.flag}")
+## Observability
+- Structured logging + correlation IDs.
+- Tracing via OpenTelemetry (Jaeger/Honeycomb).
+- Metrics: request latency, error rates, migration lag.
 
+## Rollback
+- Keep DB backups + feature flags.
+- If v2 misbehaves, route 100% traffic back to v1 and stop dual writes.
+"""
 
-async def run_migrations(steps: Sequence[MigrationStep]) -> None:
-    for step in steps:
-        await apply_step(step)
-    print("all migrations applied")
-
-
-def plan_zero_downtime() -> list[MigrationStep]:
-    return [
-        MigrationStep(name="add_new_column_nullable", sql="alter table users add column tier text null"),
-        MigrationStep(
-            name="backfill_column",
-            sql="update users set tier = 'free' where tier is null",
-        ),
-        MigrationStep(
-            name="set_not_null",
-            sql="alter table users alter column tier set not null",
-        ),
-        MigrationStep(
-            name="dual_writes",
-            sql="-- application writes both old and new columns under feature flag",
-            flag="dual_writes",
-        ),
-        MigrationStep(
-            name="cleanup_old_column",
-            sql="alter table users drop column legacy_plan",
-        ),
-    ]
-
-
-async def main() -> None:
-    steps = plan_zero_downtime()
-    await run_migrations(steps)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
-# Pythonic backend problem solved: Sequenced, idempotent migrations with optional feature flags for dual writes/backfills to avoid downtime.

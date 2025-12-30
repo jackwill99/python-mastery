@@ -1,59 +1,95 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
-import secrets
 import time
-from typing import TypedDict
+from functools import wraps
+from typing import Annotated, Callable, Literal, Sequence
 
-# Pro-Tip: Instead of Passport.js or Dart's shelf_jwt, Python stdlib gives you HMAC+PBKDF2; add external libs (pyjwt, passlib, argon2-cffi) in real services.
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from passlib.hash import argon2
+from pydantic import BaseModel, Field
+
+# Senior Pro-Tip: OAuth2 + JWT in Python mirrors NestJS passport-jwt or Dart shelf_jwt; Argon2 via passlib gives stronger password hashing than bcrypt defaults.
+
+Role = Literal["admin", "member"]
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+JWT_SECRET = "dev-secret"
+JWT_ALG = "HS256"
 
 
-class TokenPayload(TypedDict):
+class TokenPayload(BaseModel):
     sub: str
+    role: Role
     exp: int
 
 
-def pbkdf2_hash(password: str, *, salt: bytes | None = None, rounds: int = 120_000) -> tuple[bytes, bytes]:
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, rounds)
-    return salt, digest
+class User(BaseModel):
+    user_id: str
+    email: str
+    password_hash: str
+    role: Role = "member"
 
 
-def verify_password(password: str, salt: bytes, digest: bytes, rounds: int = 120_000) -> bool:
-    new_digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, rounds)
-    return hmac.compare_digest(new_digest, digest)
+def create_password_hash(raw: str) -> str:
+    return argon2.hash(raw)
 
 
-def encode_token(payload: TokenPayload, *, secret: str) -> str:
-    body = json.dumps(payload, separators=(",", ":")).encode()
-    signature = hmac.new(secret.encode(), body, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(body + b"." + signature).decode()
+def verify_password(raw: str, hashed: str) -> bool:
+    return argon2.verify(raw, hashed)
 
 
-def decode_token(token: str, *, secret: str) -> TokenPayload:
-    raw = base64.urlsafe_b64decode(token.encode())
-    body, signature = raw.rsplit(b".", 1)
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).digest()
-    if not hmac.compare_digest(signature, expected):
-        raise ValueError("invalid signature")
-    payload: TokenPayload = json.loads(body.decode())
-    if payload["exp"] < int(time.time()):
-        raise ValueError("token expired")
-    return payload
+def create_token(user: User, ttl_seconds: int = 3600) -> str:
+    payload = TokenPayload(sub=user.user_id, role=user.role, exp=int(time.time()) + ttl_seconds)
+    return jwt.encode(payload.model_dump(), JWT_SECRET, algorithm=JWT_ALG)
 
 
-def main() -> None:
-    salt, digest = pbkdf2_hash("Sup3rSecret!")
-    assert verify_password("Sup3rSecret!", salt, digest)
-    token = encode_token({"sub": "u-1", "exp": int(time.time()) + 60}, secret="dev-secret")
-    parsed = decode_token(token, secret="dev-secret")
-    print("token payload:", parsed)
+def decode_token(token: str) -> TokenPayload:
+    try:
+        data = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        return TokenPayload.model_validate(data)
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token") from exc
 
 
-if __name__ == "__main__":
-    main()
+def require_roles(roles: Sequence[Role]) -> Callable[[Callable[..., object]], Callable[..., object]]:
+    def decorator(fn: Callable[..., object]) -> Callable[..., object]:
+        @wraps(fn)
+        def wrapper(user: User, *args: object, **kwargs: object) -> object:
+            if user.role not in roles:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+            return fn(user, *args, **kwargs)
 
-# Pythonic backend problem solved: Stateless HMAC tokens and PBKDF2 hashing without extra dependencies; swap in JWT/argon2 for production.
+        return wrapper
+
+    return decorator
+
+
+async def current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> User:
+    payload = decode_token(token)
+    # In production, load user from DB; here we mock.
+    return User(user_id=payload.sub, email="user@example.com", password_hash="x", role=payload.role)
+
+
+app = FastAPI(title="Security Service", version="1.0.0")
+
+
+@app.post("/token")
+async def issue_token(email: str, password: str) -> dict[str, str]:
+    # Replace with DB lookup + hash verify
+    user = User(user_id="u-1", email=email, password_hash=create_password_hash(password), role="admin")
+    return {"access_token": create_token(user), "token_type": "bearer"}
+
+
+@app.get("/admin")
+async def admin_area(user: Annotated[User, Depends(current_user)]) -> dict[str, str]:
+    secured = require_roles(["admin"])
+    secured(lambda u: None)(user)  # role check
+    return {"msg": "welcome admin"}
+
+
+@app.get("/me")
+async def me(user: Annotated[User, Depends(current_user)]) -> dict[str, str]:
+    return {"user_id": user.user_id, "role": user.role}
+

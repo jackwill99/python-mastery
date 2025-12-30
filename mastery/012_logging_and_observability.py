@@ -1,60 +1,56 @@
 from __future__ import annotations
 
-import json
-import logging
-from contextlib import contextmanager
+import structlog
 from contextvars import ContextVar
-from datetime import datetime
-from typing import Iterator
+from typing import Any, Callable
 
-# Pro-Tip: Similar to pino/winston or Dart's Logger, but ContextVars let you thread correlation IDs through async code without globals.
+# Senior Pro-Tip: Like pino/winston with CLS in Node or Logger with zones in Dart, structlog + ContextVars propagate correlation IDs cleanly through async code.
 
-request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
-
-
-class JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {
-            "ts": datetime.utcnow().isoformat(),
-            "level": record.levelname,
-            "msg": record.getMessage(),
-            "request_id": request_id_var.get(),
-            "logger": record.name,
-        }
-        if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
-        return json.dumps(payload)
+correlation_id: ContextVar[str | None] = ContextVar("correlation_id", default=None)
 
 
-def setup_logging() -> logging.Logger:
-    logger = logging.getLogger("app")
-    handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    return logger
+def add_correlation_id(logger: structlog.types.WrappedLogger, method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+    cid = correlation_id.get()
+    if cid:
+        event_dict["correlation_id"] = cid
+    return event_dict
 
 
-@contextmanager
-def log_context(request_id: str) -> Iterator[None]:
-    token = request_id_var.set(request_id)
-    try:
-        yield
-    finally:
-        request_id_var.reset(token)
+def configure_logger() -> structlog.stdlib.BoundLogger:
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            add_correlation_id,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(structlog.INFO),
+    )
+    return structlog.get_logger()
 
 
-def handle_request(logger: logging.Logger, user_id: str) -> None:
-    with log_context(request_id=f"req-{user_id}"):
-        logger.info("fetching user profile")
-        try:
-            raise ValueError("boom")
-        except ValueError:
-            logger.exception("failed fetching user profile")
+def with_correlation_id(cid: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            token = correlation_id.set(cid)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                correlation_id.reset(token)
+
+        return wrapper
+
+    return decorator
+
+
+logger = configure_logger()
+
+
+@with_correlation_id("req-123")
+def handle_request() -> None:
+    logger.info("processing", path="/payments", method="POST")
+    logger.info("completed", status=200)
 
 
 if __name__ == "__main__":
-    log = setup_logging()
-    handle_request(log, "123")
+    handle_request()
 
-# Pythonic backend problem solved: Structured logs with per-request correlation IDs for observability across async boundaries.

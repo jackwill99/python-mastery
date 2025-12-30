@@ -4,51 +4,71 @@ import asyncio
 from collections import defaultdict
 from typing import Awaitable, Callable
 
-# Pro-Tip: Similar to Node's EventEmitter or Dart Streams; asyncio.Queue + handler registry yields backpressure-friendly event buses.
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+
+# Senior Pro-Tip: Comparable to Node KafkaJS or Dart Streams; enforce idempotency to avoid double-processing when consumers restart or rebalances occur.
 
 Handler = Callable[[dict[str, object]], Awaitable[None]]
 
 
 class EventBus:
-    def __init__(self) -> None:
-        self.handlers: dict[str, list[Handler]] = defaultdict(list)
-        self.queue: asyncio.Queue[tuple[str, dict[str, object]]] = asyncio.Queue()
+    def __init__(self, producer: AIOKafkaProducer) -> None:
+        self.producer = producer
 
-    def subscribe(self, event: str, handler: Handler) -> None:
+    async def publish(self, topic: str, payload: dict[str, object]) -> None:
+        await self.producer.send_and_wait(topic, str(payload).encode())
+
+
+class Consumer:
+    def __init__(self, topic: str, group_id: str, bootstrap: str = "localhost:9092") -> None:
+        self.topic = topic
+        self.group_id = group_id
+        self.bootstrap = bootstrap
+        self.handlers: dict[str, list[Handler]] = defaultdict(list)
+        self.processed_keys: set[str] = set()
+
+    def on(self, event: str, handler: Handler) -> None:
         self.handlers[event].append(handler)
 
-    async def publish(self, event: str, payload: dict[str, object]) -> None:
-        await self.queue.put((event, payload))
+    async def start(self) -> None:
+        consumer = AIOKafkaConsumer(
+            self.topic,
+            bootstrap_servers=self.bootstrap,
+            group_id=self.group_id,
+            enable_auto_commit=True,
+        )
+        await consumer.start()
+        try:
+            async for msg in consumer:
+                key = f"{msg.topic}:{msg.partition}:{msg.offset}"
+                if key in self.processed_keys:
+                    continue  # idempotent guard
+                self.processed_keys.add(key)
+                event_name = self.topic
+                payload = {"value": msg.value.decode()}
+                for handler in self.handlers.get(event_name, []):
+                    await handler(payload)
+        finally:
+            await consumer.stop()
 
-    async def run(self) -> None:
-        while True:
-            event, payload = await self.queue.get()
-            tasks = [asyncio.create_task(h(payload)) for h in self.handlers.get(event, [])]
-            if tasks:
-                await asyncio.gather(*tasks)
-            self.queue.task_done()
 
-
-async def on_user_created(payload: dict[str, object]) -> None:
-    await asyncio.sleep(0.01)
-    print("welcome user", payload["user_id"])
-
-
-async def on_user_created_audit(payload: dict[str, object]) -> None:
-    await asyncio.sleep(0.01)
-    print("audit user", payload)
+async def example_handler(payload: dict[str, object]) -> None:
+    print("handled:", payload)
 
 
 async def main() -> None:
-    bus = EventBus()
-    bus.subscribe("user.created", on_user_created)
-    bus.subscribe("user.created", on_user_created_audit)
-    runner = asyncio.create_task(bus.run())
+    producer = AIOKafkaProducer(bootstrap_servers="localhost:9092")
+    await producer.start()
+    bus = EventBus(producer)
+    consumer = Consumer(topic="user.created", group_id="payments")
+    consumer.on("user.created", example_handler)
+    consumer_task = asyncio.create_task(consumer.start())
     await bus.publish("user.created", {"user_id": "u-1"})
-    await bus.queue.join()
-    runner.cancel()
+    await asyncio.sleep(0.5)
+    consumer_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
-        await runner
+        await consumer_task
+    await producer.stop()
 
 
 if __name__ == "__main__":
@@ -56,4 +76,3 @@ if __name__ == "__main__":
 
     asyncio.run(main())
 
-# Pythonic backend problem solved: Simple async event bus for decoupled workflows; swap Queue with Kafka or NATS for distributed setups.

@@ -1,41 +1,31 @@
 from __future__ import annotations
 
-import os
-import tomllib
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from functools import lru_cache
 
-# Pro-Tip: Like NestJS ConfigService or Dart's const-from-environment, prefer typed config objects sourced from env + TOML/YAML with overrides per stage.
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Senior Pro-Tip: Like NestJS ConfigService or Dart const environments, pydantic-settings gives typed env parsing; cache a singleton to avoid repeated parsing.
 
 
-@dataclass(frozen=True)
-class Settings:
-    stage: str
-    db_url: str
-    api_host: str
-    secret_key: str
-    extra: dict[str, Any]
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__")
 
-    @classmethod
-    def load(cls, *, stage: str | None = None, pyproject: Path = Path("pyproject.toml")) -> "Settings":
-        stage = stage or os.getenv("APP_STAGE", "dev")
-        db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-        api_host = os.getenv("API_HOST", "http://localhost:8000")
-        secret_key = os.getenv("APP_SECRET", "dev-secret")
-        extra = {}
-        if pyproject.exists():
-            data = tomllib.loads(pyproject.read_text())
-            extra = data.get("tool", {}).get("app", {}).get("overrides", {}).get(stage, {})
-        return cls(stage=stage, db_url=db_url, api_host=api_host, secret_key=secret_key, extra=extra)
+    app_name: str = "python-service"
+    stage: str = "dev"
+    database_url: str = "postgresql://localhost/app"
+    secrets_path: str | None = None
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()  # cached singleton
 
 
 def main() -> None:
-    settings = Settings.load()
-    print("Settings:", settings)
+    settings = get_settings()
+    print(settings)
 
 
 if __name__ == "__main__":
     main()
 
-# Pythonic backend problem solved: Single source of truth for config with environment overrides; easy to inject into FastAPI/CLIs without globals.

@@ -1,35 +1,57 @@
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
+pyproject_poetry = """\
+[tool.poetry]
+name = "python-service"
+version = "0.1.0"
+description = "Example production service"
+authors = ["You <you@example.com>"]
+readme = "README.md"
+packages = [{ include = "python_service" }]
 
-# Pro-Tip: Similar to `npm pack` or Flutter build, Python packages are defined in pyproject.toml; build wheels via `python -m build` or `hatch build`.
+[tool.poetry.dependencies]
+python = "^3.12"
+fastapi = "^0.110"
+uvicorn = { extras = ["standard"], version = "^0.29" }
 
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.5"
+mypy = "^1.10"
+pytest = "^8.0"
+pytest-asyncio = "^0.23"
 
-def run(cmd: list[str]) -> None:
-    print("+", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+"""
 
+pyproject_uv = """\
+[project]
+name = "python-service"
+version = "0.1.0"
+description = "Example production service"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+]
 
-def ensure_pyproject() -> None:
-    pyproject = Path("pyproject.toml")
-    if not pyproject.exists():
-        pyproject.write_text(
-            "[project]\nname = 'python-service'\nversion = '0.1.0'\ndescription = 'Example service'\nrequires-python = '>=3.12'\n"
-        )
+[tool.uv]
+dev-dependencies = [
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+"""
 
-def build() -> None:
-    ensure_pyproject()
-    run(["python", "-m", "pip", "install", "--upgrade", "build"])
-    run(["python", "-m", "build"])
-
+# Senior Pro-Tip: Poetry/uv group deps mirror npm/yarn workspaces dev/prod split; wheels (bdist_wheel) are the Python equivalent of npm pack artifacts.
 
 if __name__ == "__main__":
-    print("Building sdist and wheel...")
-    try:
-        build()
-    except subprocess.CalledProcessError as exc:
-        print("Build failed:", exc)
+    print("Poetry template:\n", pyproject_poetry)
+    print("\nuv template:\n", pyproject_uv)
 
-# Pythonic backend problem solved: Reproducible builds via wheels/sdists; swap backend (hatchling/poetry) by editing pyproject, no code changes.

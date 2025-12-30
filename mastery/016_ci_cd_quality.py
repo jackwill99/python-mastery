@@ -1,31 +1,35 @@
-from __future__ import annotations
+github_actions_yaml = """\
+name: ci
 
-import subprocess
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
-# Pro-Tip: Like GitHub Actions or GitLab CI running eslint+tests, wire Ruff/pytest/mypy as fast feedback; fail-fast keeps pipelines lean.
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ruff mypy pytest pytest-asyncio
+          pip install -e .
+      - name: Ruff
+        run: ruff check .
+      - name: MyPy
+        run: mypy .
+      - name: Pytest
+        run: pytest -q
+"""
 
-
-def run_step(name: str, cmd: list[str]) -> None:
-    print(f":: Running {name}")
-    subprocess.run(cmd, check=True)
-
-
-def main() -> None:
-    steps = [
-        ("format-check", ["ruff", "format", "--check", "."]),
-        ("lint", ["ruff", "check", "."]),
-        ("types", ["python", "-m", "mypy", "."]),
-        ("tests", ["python", "-m", "pytest", "-q"]),
-    ]
-    for name, cmd in steps:
-        run_step(name, cmd)
-    print("CI pipeline succeeded")
-
+# Senior Pro-Tip: Similar to GitHub Actions for Node (eslint/jest), but pin the Python version and cache deps if runs slow; keep CI steps minimal and fail-fast.
 
 if __name__ == "__main__":
-    try:
-        main()
-    except subprocess.CalledProcessError as exc:
-        print(f"Pipeline failed at step: {exc.cmd}")
+    print(github_actions_yaml)
 
-# Pythonic backend problem solved: Single script to mirror CI locally; swap tools/flags easily without editing YAML pipelines.
