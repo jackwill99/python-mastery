@@ -1,77 +1,57 @@
 from __future__ import annotations
 
 import asyncio
-import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from math import sqrt
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from random import randint
 from typing import Iterable
 
-# Pro-Tip: The GIL limits CPU-bound threading (unlike Node's libuv offloading or Dart isolates); use multiprocessing for CPU and asyncio for I/O.
+# Pro-Tip: Think Node's worker_threads vs Dart isolates—CPU-bound compression stalls Python threads due to the GIL; multiprocessing sidesteps the GIL for true parallelism.
 
 
-def is_prime(n: int) -> bool:
-    if n < 2:
-        return False
-    for i in range(2, int(sqrt(n)) + 1):
-        if n % i == 0:
-            return False
-    return True
+@dataclass(frozen=True)
+class VideoJob:
+    video_id: str
+    quality: str
 
 
-def count_primes(values: Iterable[int]) -> int:
-    return sum(1 for v in values if is_prime(v))
+async def fetch_metadata(video_id: str) -> dict[str, str]:
+    # Simulate I/O-bound metadata fetch (e.g., hitting object storage or a metadata DB).
+    await asyncio.sleep(0.05)
+    return {"video_id": video_id, "duration_sec": str(randint(30, 600)), "codec": "h264"}
 
 
-def io_bound_task(delay_ms: int) -> str:
-    time.sleep(delay_ms / 1000)
-    return f"slept {delay_ms}ms"
+def compress_video(job: VideoJob) -> str:
+    # CPU-bound loop to simulate heavy compression work; runs in a separate process to bypass the GIL.
+    pixels = 1024 * 512
+    _ = sum((i * 3) % 255 for i in range(pixels))  # fake CPU load
+    return f"compressed_{job.video_id}_{job.quality}"
 
 
-async def asyncio_io_workload(delays: list[int]) -> list[str]:
-    async def sleeper(d: int) -> str:
-        await asyncio.sleep(d / 1000)
-        return f"async slept {d}ms"
-
+async def process_videos(video_ids: Iterable[str], quality: str = "1080p") -> list[str]:
     async with asyncio.TaskGroup() as tg:
-        tasks = [tg.create_task(sleeper(d)) for d in delays]
-    return [t.result() for t in tasks]
+        meta_tasks = {tg.create_task(fetch_metadata(v)): v for v in video_ids}
+    metadata = {v: t.result() for t, v in meta_tasks.items()}
 
-
-def threaded_io(delays: list[int]) -> list[str]:
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        return list(pool.map(io_bound_task, delays))
-
-
-def threaded_cpu(values: list[int]) -> int:
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        return sum(pool.map(is_prime, values))  # GIL keeps this mostly single-core
-
-
-def multiprocess_cpu(values: list[int]) -> int:
+    # Senior Note: ThreadPoolExecutor would serialize CPU-bound work under the GIL. ProcessPoolExecutor uses OS processes for parallel compression.
+    loop = asyncio.get_running_loop()
+    results: list[str] = []
     with ProcessPoolExecutor() as pool:
-        return sum(pool.map(is_prime, values))
+        compression_tasks = [
+            loop.run_in_executor(pool, compress_video, VideoJob(video_id=v, quality=quality)) for v in metadata
+        ]
+        for result in await asyncio.gather(*compression_tasks):
+            results.append(result)
+    return results
 
 
-def main() -> None:
-    nums = list(range(100_000, 100_800))
-    delays = [50, 60, 70, 80]
-
-    start = time.perf_counter()
-    threaded_cpu_result = threaded_cpu(nums)
-    print(f"Threaded CPU primes={threaded_cpu_result} took {time.perf_counter() - start:.3f}s")
-
-    start = time.perf_counter()
-    multiprocess_cpu_result = multiprocess_cpu(nums)
-    print(f"Multiprocess CPU primes={multiprocess_cpu_result} took {time.perf_counter() - start:.3f}s")
-
-    start = time.perf_counter()
-    threaded_io_result = threaded_io(delays)
-    print(f"Threaded IO: {threaded_io_result} took {time.perf_counter() - start:.3f}s")
-
-    start = time.perf_counter()
-    asyncio_result = asyncio.run(asyncio_io_workload(delays))
-    print(f"AsyncIO IO: {asyncio_result} took {time.perf_counter() - start:.3f}s")
+async def main() -> None:
+    videos = [f"vid_{i}" for i in range(5)]
+    outputs = await process_videos(videos, quality="720p")
+    for out in outputs:
+        print(out)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+
