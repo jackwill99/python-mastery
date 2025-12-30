@@ -3,62 +3,85 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-# Pro-Tip: Like TS `interface` + NestJS providers, Protocols give structural typing; metaclasses enforce constraints at class creation (think NestJS decorators or Dart annotations but executed at import).
+# Pro-Tip: Dart abstract classes define shape; Python's Protocols are structural (duck-typed) and can be runtime-checked. Metaclasses here act like compile-time linters for plugin docs—similar to NestJS provider decorators, but enforced at import.
 
 
-class PluginMeta(type):
-    """Metaclass that enforces plugin contract at definition time and registers implementations."""
+class DocEnforcingMeta(type):
+    """Metaclass that enforces documentation standards and registers payment gateway plugins."""
 
-    registry: dict[str, type["BasePlugin"]] = {}
+    registry: dict[str, type["PaymentGateway"]] = {}
+    required_doc_phrase = "Payment Gateway Plugin"
 
     def __new__(mcls, name: str, bases: tuple[type, ...], ns: dict[str, object]):
         cls = super().__new__(mcls, name, bases, ns)
         plugin_name = getattr(cls, "plugin_name", None)
-        if plugin_name and plugin_name in mcls.registry:
-            raise ValueError(f"Duplicate plugin_name '{plugin_name}' for {name}")
+        doc = (cls.__doc__ or "").strip()
         if plugin_name:
-            mcls.registry[plugin_name] = cls  # register for dynamic lookup
+            if plugin_name in mcls.registry:
+                raise ValueError(f"Duplicate plugin_name '{plugin_name}' for {name}")
+            if mcls.required_doc_phrase not in doc:
+                raise ValueError(f"{name} missing required doc phrase: '{mcls.required_doc_phrase}'")
+            mcls.registry[plugin_name] = cls
         return cls
 
 
 @runtime_checkable
-class BasePlugin(Protocol):
+class PaymentGateway(Protocol):
     plugin_name: str
 
-    def render(self, payload: dict[str, object]) -> str: ...
+    def charge(self, amount_cents: int, currency: str, token: str) -> str: ...
+
+    def refund(self, charge_id: str, amount_cents: int | None = None) -> str: ...
 
 
 @dataclass
-class MarkdownPlugin(metaclass=PluginMeta):
-    plugin_name: str = "markdown"
+class StripePlugin(metaclass=DocEnforcingMeta):
+    """Payment Gateway Plugin: Stripe implementation."""
 
-    def render(self, payload: dict[str, object]) -> str:
-        title = payload.get("title", "Untitled")
-        body = payload.get("body", "")
-        return f"# {title}\n\n{body}"
+    plugin_name: str = "stripe"
+
+    def charge(self, amount_cents: int, currency: str, token: str) -> str:
+        if amount_cents <= 0:
+            raise ValueError("amount must be positive")
+        return f"stripe_charge_{amount_cents}_{currency}_{token[:4]}"
+
+    def refund(self, charge_id: str, amount_cents: int | None = None) -> str:
+        return f"stripe_refund_{charge_id}_{amount_cents or 'full'}"
 
 
 @dataclass
-class HtmlPlugin(metaclass=PluginMeta):
-    plugin_name: str = "html"
+class AdyenPlugin(metaclass=DocEnforcingMeta):
+    """Payment Gateway Plugin: Adyen implementation."""
 
-    def render(self, payload: dict[str, object]) -> str:
-        title = payload.get("title", "Untitled")
-        body = payload.get("body", "")
-        return f"<h1>{title}</h1><p>{body}</p>"
+    plugin_name: str = "adyen"
+
+    def charge(self, amount_cents: int, currency: str, token: str) -> str:
+        if currency not in {"USD", "EUR"}:
+            raise ValueError("unsupported currency")
+        return f"adyen_charge_{amount_cents}_{currency}_{token[:4]}"
+
+    def refund(self, charge_id: str, amount_cents: int | None = None) -> str:
+        return f"adyen_refund_{charge_id}_{amount_cents or 'full'}"
 
 
-def render_with_plugin(name: str, payload: dict[str, object]) -> str:
-    cls = PluginMeta.registry[name]
-    plugin: BasePlugin = cls()  # satisfies Protocol structurally
-    return plugin.render(payload)
+def process_payment(gateway_name: str, amount_cents: int, currency: str, token: str) -> str:
+    cls = DocEnforcingMeta.registry[gateway_name]
+    gateway: PaymentGateway = cls()
+    return gateway.charge(amount_cents, currency, token)
 
 
-def discover_plugins() -> list[str]:
-    return sorted(PluginMeta.registry.keys())
+def process_refund(gateway_name: str, charge_id: str, amount_cents: int | None = None) -> str:
+    cls = DocEnforcingMeta.registry[gateway_name]
+    gateway: PaymentGateway = cls()
+    return gateway.refund(charge_id, amount_cents)
+
+
+def list_gateways() -> list[str]:
+    return sorted(DocEnforcingMeta.registry.keys())
 
 
 if __name__ == "__main__":
-    print("Plugins registered:", discover_plugins())
-    print(render_with_plugin("markdown", {"title": "Hello", "body": "from metaclasses"}))
-    print(render_with_plugin("html", {"title": "Hello", "body": "from Protocols"}))
+    print("Registered gateways:", list_gateways())
+    charge_id = process_payment("stripe", 2000, "USD", "tok_abc123")
+    print("Charge:", charge_id)
+    print("Refund:", process_refund("stripe", charge_id))
